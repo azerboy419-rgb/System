@@ -23,36 +23,58 @@ jobs:
           distribution: temurin
           java-version: '25'
 
-      - name: Find Gradle project
-        id: find-gradle
+      - name: Extract project ZIP
         shell: bash
         run: |
-          GRADLEW=$(find . -type f -name gradlew -not -path '*/.git/*' | head -n 1)
+          set -e
+          ZIP=$(find . -maxdepth 2 -type f -name 'System_TriggerBot_AimAssist*GitHubActions*.zip' | head -n 1)
 
-          if [ -z "$GRADLEW" ]; then
-            echo "::error::gradlew not found. Upload the complete Gradle project."
-            echo "Files in repository:"
-            ls -la
-            find . -maxdepth 4 -type f | sort | head -200
+          if [ -z "$ZIP" ]; then
+            ZIP=$(find . -maxdepth 2 -type f -name '*.zip' | head -n 1)
+          fi
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::No project ZIP found in repository."
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$GRADLEW")
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Found Gradle project: $PROJECT_DIR"
+          mkdir -p extracted
+          unzip -oq "$ZIP" -d extracted
 
-      - name: Make Gradle wrapper executable
-        working-directory: ${{ steps.find-gradle.outputs.dir }}
-        run: chmod +x ./gradlew
+          PROJECT_DIR=$(dirname "$(find extracted -type f -name gradle-wrapper.properties | head -n 1)")
+
+          if [ "$PROJECT_DIR" = "extracted" ] || [ ! -f "$PROJECT_DIR/gradle-wrapper.properties" ]; then
+            echo "::error::gradle-wrapper.properties not found inside ZIP."
+            find extracted -maxdepth 5 -type f | head -200
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$(dirname "$PROJECT_DIR")")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build mod
-        working-directory: ${{ steps.find-gradle.outputs.dir }}
-        run: ./gradlew --no-daemon build
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          VERSION=$(sed -n 's/^distributionUrl=.*gradle-\([0-9.]*\)-bin.zip.*/\1/p' gradle/wrapper/gradle-wrapper.properties)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine Gradle version."
+            cat gradle/wrapper/gradle-wrapper.properties
+            exit 1
+          fi
+          wget -q "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -O /tmp/gradle.zip
+          unzip -oq /tmp/gradle.zip -d /tmp
+          "/tmp/gradle-${VERSION}/bin/gradle" --no-daemon build
 
       - name: Upload mod JAR
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: fabric-mod
-          path: ${{ steps.find-gradle.outputs.dir }}/build/libs/*.jar
+          path: extracted/**/build/libs/*.jar
           if-no-files-found: error
