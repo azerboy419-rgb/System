@@ -26,14 +26,16 @@ jobs:
       - name: Extract project ZIP
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ZIP=$(find . -maxdepth 2 -type f \
-            -name 'System_TriggerBot_AimAssist*GitHubActions*.zip' \
-            -not -path './.git/*' | head -n 1)
+          ZIP=$(find . -maxdepth 4 -type f \
+            -iname '*.zip' \
+            -not -path './.git/*' \
+            | head -n 1 || true)
 
           if [ -z "$ZIP" ]; then
-            echo "::error::Project ZIP not found."
+            echo "::error::Project ZIP not found. Upload the ZIP to the repository."
+            find . -maxdepth 4 -type f | head -200
             exit 1
           fi
 
@@ -45,11 +47,12 @@ jobs:
         id: find-gradle
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           SETTINGS=$(find extracted -type f \
             \( -name settings.gradle -o -name settings.gradle.kts \) \
-            | head -n 1)
+            -not -path '*/.gradle/*' \
+            | head -n 1 || true)
 
           if [ -z "$SETTINGS" ]; then
             echo "::error::settings.gradle not found in ZIP."
@@ -60,8 +63,7 @@ jobs:
           PROJECT_DIR=$(dirname "$SETTINGS")
 
           if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "::error::gradle-wrapper.properties not found."
-            find "$PROJECT_DIR" -maxdepth 5 -type f | head -200
+            echo "::error::Gradle wrapper properties not found."
             exit 1
           fi
 
@@ -73,44 +75,24 @@ jobs:
         env:
           PROJECT_DIR: ${{ steps.find-gradle.outputs.dir }}
         run: |
-          set -e
+          set -euo pipefail
 
           python3 - "$PROJECT_DIR" <<'PY'
           import sys
           from pathlib import Path
 
           root = Path(sys.argv[1])
-          files = [
-              root / "settings.gradle",
-              root / "settings.gradle.kts",
-          ]
 
-          found = False
-
-          for path in files:
-              if not path.is_file():
-                  continue
-
-              text = path.read_text()
-              updated = text.replace(
-                  "RepositoriesMode.PREFER_SETTINGS",
-                  "RepositoriesMode.PREFER_PROJECT"
-              )
-              updated = updated.replace(
-                  "RepositoriesMode.FAIL_ON_PROJECT_REPOS",
-                  "RepositoriesMode.PREFER_PROJECT"
-              )
-
-              if updated != text:
-                  path.write_text(updated)
-                  print("Updated:", path)
-              else:
-                  print("No matching repository mode in:", path)
-
-              found = True
-
-          if not found:
-              raise SystemExit("settings.gradle(.kts) not found")
+          for name in ("settings.gradle", "settings.gradle.kts"):
+              path = root / name
+              if path.is_file():
+                  text = path.read_text()
+                  text = text.replace(
+                      "RepositoriesMode.FAIL_ON_PROJECT_REPOS",
+                      "RepositoriesMode.PREFER_PROJECT"
+                  )
+                  path.write_text(text)
+                  print("Checked:", path)
           PY
 
       - name: Set up Gradle
@@ -121,31 +103,15 @@ jobs:
         env:
           PROJECT_DIR: ${{ steps.find-gradle.outputs.dir }}
         run: |
-          set -e
+          set -euo pipefail
           cd "$PROJECT_DIR"
-
-          VERSION=$(sed -n \
-            's/^distributionUrl=.*gradle-\([0-9.]*\)-bin.zip.*/\1/p' \
-            gradle/wrapper/gradle-wrapper.properties)
-
-          if [ -z "$VERSION" ]; then
-            echo "::error::Cannot determine Gradle version."
-            cat gradle/wrapper/gradle-wrapper.properties
-            exit 1
-          fi
-
-          wget -q \
-            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \
-            -O /tmp/gradle.zip
-
-          unzip -oq /tmp/gradle.zip -d /tmp
-
-          "/tmp/gradle-${VERSION}/bin/gradle" --no-daemon build
+          chmod +x ./gradlew
+          ./gradlew --no-daemon build
 
       - name: Upload mod JAR
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: fabric-mod
+          name: trigger-aim
           path: extracted/**/build/libs/*.jar
           if-no-files-found: error
