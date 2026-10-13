@@ -33,15 +33,13 @@ jobs:
             -not -path './.git/*' | head -n 1)
 
           if [ -z "$ZIP" ]; then
-            echo "::error::Project ZIP not found in repository."
+            echo "::error::Project ZIP not found."
             exit 1
           fi
 
           mkdir -p extracted
           unzip -oq "$ZIP" -d extracted
-
-          echo "Archive extracted:"
-          find extracted -maxdepth 3 -type f | head -100
+          echo "Extracted: $ZIP"
 
       - name: Find Gradle project
         id: find-gradle
@@ -54,7 +52,7 @@ jobs:
             | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::settings.gradle was not found inside the ZIP."
+            echo "::error::settings.gradle not found in ZIP."
             find extracted -maxdepth 5 -type f | head -200
             exit 1
           fi
@@ -62,8 +60,8 @@ jobs:
           PROJECT_DIR=$(dirname "$SETTINGS")
 
           if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "::error::Gradle wrapper properties were not found."
-            find "$PROJECT_DIR" -maxdepth 4 -type f | head -200
+            echo "::error::gradle-wrapper.properties not found."
+            find "$PROJECT_DIR" -maxdepth 5 -type f | head -200
             exit 1
           fi
 
@@ -77,28 +75,43 @@ jobs:
         run: |
           set -e
 
-          SETTINGS="$PROJECT_DIR/settings.gradle"
-          if [ ! -f "$SETTINGS" ]; then
-            SETTINGS="$PROJECT_DIR/settings.gradle.kts"
-          fi
-
-          python3 - "$SETTINGS" <<'PY'
+          python3 - "$PROJECT_DIR" <<'PY'
           import sys
           from pathlib import Path
 
-          p = Path(sys.argv[1])
-          text = p.read_text()
+          root = Path(sys.argv[1])
+          files = [
+              root / "settings.gradle",
+              root / "settings.gradle.kts",
+          ]
 
-          text = text.replace(
-              "RepositoriesMode.PREFER_SETTINGS",
-              "RepositoriesMode.PREFER_PROJECT"
-          )
+          found = False
 
-          p.write_text(text)
-          print("Updated repository mode in", p)
+          for path in files:
+              if not path.is_file():
+                  continue
+
+              text = path.read_text()
+              updated = text.replace(
+                  "RepositoriesMode.PREFER_SETTINGS",
+                  "RepositoriesMode.PREFER_PROJECT"
+              )
+              updated = updated.replace(
+                  "RepositoriesMode.FAIL_ON_PROJECT_REPOS",
+                  "RepositoriesMode.PREFER_PROJECT"
+              )
+
+              if updated != text:
+                  path.write_text(updated)
+                  print("Updated:", path)
+              else:
+                  print("No matching repository mode in:", path)
+
+              found = True
+
+          if not found:
+              raise SystemExit("settings.gradle(.kts) not found")
           PY
-
-          cat "$SETTINGS"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -116,7 +129,7 @@ jobs:
             gradle/wrapper/gradle-wrapper.properties)
 
           if [ -z "$VERSION" ]; then
-            echo "::error::Could not determine Gradle version."
+            echo "::error::Cannot determine Gradle version."
             cat gradle/wrapper/gradle-wrapper.properties
             exit 1
           fi
@@ -127,8 +140,7 @@ jobs:
 
           unzip -oq /tmp/gradle.zip -d /tmp
 
-          "/tmp/gradle-${VERSION}/bin/gradle" \
-            --no-daemon build
+          "/tmp/gradle-${VERSION}/bin/gradle" --no-daemon build
 
       - name: Upload mod JAR
         if: success()
