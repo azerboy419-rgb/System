@@ -27,49 +27,108 @@ jobs:
         shell: bash
         run: |
           set -e
-          ZIP=$(find . -maxdepth 2 -type f -name 'System_TriggerBot_AimAssist*GitHubActions*.zip' | head -n 1)
+
+          ZIP=$(find . -maxdepth 2 -type f \
+            -name 'System_TriggerBot_AimAssist*GitHubActions*.zip' \
+            -not -path './.git/*' | head -n 1)
 
           if [ -z "$ZIP" ]; then
-            ZIP=$(find . -maxdepth 2 -type f -name '*.zip' | head -n 1)
-          fi
-
-          if [ -z "$ZIP" ]; then
-            echo "::error::No project ZIP found in repository."
+            echo "::error::Project ZIP not found in repository."
             exit 1
           fi
 
           mkdir -p extracted
           unzip -oq "$ZIP" -d extracted
 
-          PROJECT_DIR=$(dirname "$(find extracted -type f -name gradle-wrapper.properties | head -n 1)")
+          echo "Archive extracted:"
+          find extracted -maxdepth 3 -type f | head -100
 
-          if [ "$PROJECT_DIR" = "extracted" ] || [ ! -f "$PROJECT_DIR/gradle-wrapper.properties" ]; then
-            echo "::error::gradle-wrapper.properties not found inside ZIP."
+      - name: Find Gradle project
+        id: find-gradle
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            | head -n 1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::settings.gradle was not found inside the ZIP."
             find extracted -maxdepth 5 -type f | head -200
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$(dirname "$PROJECT_DIR")")
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "::error::Gradle wrapper properties were not found."
+            find "$PROJECT_DIR" -maxdepth 4 -type f | head -200
+            exit 1
+          fi
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           echo "Project directory: $PROJECT_DIR"
 
-      - name: Install Gradle
+      - name: Fix Fabric Loom repository settings
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.find-gradle.outputs.dir }}
+        run: |
+          set -e
+
+          SETTINGS="$PROJECT_DIR/settings.gradle"
+          if [ ! -f "$SETTINGS" ]; then
+            SETTINGS="$PROJECT_DIR/settings.gradle.kts"
+          fi
+
+          python3 - "$SETTINGS" <<'PY'
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          text = p.read_text()
+
+          text = text.replace(
+              "RepositoriesMode.PREFER_SETTINGS",
+              "RepositoriesMode.PREFER_PROJECT"
+          )
+
+          p.write_text(text)
+          print("Updated repository mode in", p)
+          PY
+
+          cat "$SETTINGS"
+
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build mod
         shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.find-gradle.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
-          VERSION=$(sed -n 's/^distributionUrl=.*gradle-\([0-9.]*\)-bin.zip.*/\1/p' gradle/wrapper/gradle-wrapper.properties)
+
+          VERSION=$(sed -n \
+            's/^distributionUrl=.*gradle-\([0-9.]*\)-bin.zip.*/\1/p' \
+            gradle/wrapper/gradle-wrapper.properties)
+
           if [ -z "$VERSION" ]; then
             echo "::error::Could not determine Gradle version."
             cat gradle/wrapper/gradle-wrapper.properties
             exit 1
           fi
-          wget -q "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" -O /tmp/gradle.zip
+
+          wget -q \
+            "https://services.gradle.org/distributions/gradle-${VERSION}-bin.zip" \
+            -O /tmp/gradle.zip
+
           unzip -oq /tmp/gradle.zip -d /tmp
-          "/tmp/gradle-${VERSION}/bin/gradle" --no-daemon build
+
+          "/tmp/gradle-${VERSION}/bin/gradle" \
+            --no-daemon build
 
       - name: Upload mod JAR
         if: success()
